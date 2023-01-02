@@ -38,13 +38,13 @@
     "lodash": "^4.17.21",
     "lodash-es": "^4.17.11",
     "material-icons": "^0.7.3",
-    "raw-loader": "^4.0.0",
+    "raw-loader": "^4.0.2",
     "rxjs": "~6.6.7",
     "tslib": "^2.0.0",
     "zone.js": "~0.11.4"
   },
   "devDependencies": {
-    "@angular-devkit/build-angular": "~12.0.5",
+    "@angular-devkit/build-angular": "~15.0.4",
     "@angular/cli": "~12.0.5",
     "@angular/compiler-cli": "~12.0.5",
     "@angular/language-service": "~12.0.5",
