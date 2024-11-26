@@ -1,4 +1,5 @@
 /*
+Copyright 2022.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +31,6 @@ import (
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,22 +44,28 @@ import (
 // TensorboardReconciler reconciles a Tensorboard object
 type TensorboardReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log logr.Logger
 }
 
-// Reconcile reads that state of the cluster for a Tensorboard object and makes changes based on the state read
-// and what is in the Tensorboard.Spec
-// +kubebuilder:rbac:groups=tensorboard.kubeflow.org,resources=tensorboards,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=tensorboard.kubeflow.org,resources=tensorboards/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=tensorboard.kubeflow.org,resources=tensorboards,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=tensorboard.kubeflow.org,resources=tensorboards/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=tensorboard.kubeflow.org,resources=tensorboards/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
-func (r *TensorboardReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	ctx := context.Background()
+// Reconcile is part of the main kubernetes reconciliation loop which aims to
+// move the current state of the cluster closer to the desired state.
+// the Tensorboard object against the actual cluster state, and then
+// perform operations to make the cluster state reflect the state specified by
+// the user.
+//
+// For more details, check Reconcile and its Result here:
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
+func (r *TensorboardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+
 	logger := r.Log.WithValues("tensorboard", req.NamespacedName)
 
 	instance := &tensorboardv1alpha1.Tensorboard{}
@@ -74,12 +80,20 @@ func (r *TensorboardReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error)
 		return reconcile.Result{}, err
 	}
 
+	// tensorboards-web-app deletes objects using foreground deletion policy, Tensorboard CR will stay until all owned objects are deleted
+	// reconcile loop might keep on trying to recreate the resources that the API server tries to delete.
+	// so when Tensorboard CR is terminating, reconcile loop should do nothing
+
+	if !instance.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
 	// Reconcile k8s deployment.
 	deployment, err := generateDeployment(instance, logger, r)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := ctrl.SetControllerReference(instance, deployment, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(instance, deployment, r.Scheme()); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := Deployment(ctx, r, deployment, logger); err != nil {
@@ -88,7 +102,7 @@ func (r *TensorboardReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error)
 
 	// Reconcile k8s service.
 	service := generateService(instance)
-	if err := ctrl.SetControllerReference(instance, service, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(instance, service, r.Scheme()); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := reconcilehelper.Service(ctx, r, service, logger); err != nil {
@@ -97,7 +111,7 @@ func (r *TensorboardReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error)
 
 	// Reconcile istio virtual service.
 	virtualService, err := generateVirtualService(instance)
-	if err := ctrl.SetControllerReference(instance, virtualService, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(instance, virtualService, r.Scheme()); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := reconcilehelper.VirtualService(ctx, r, virtualService.GetName(), virtualService.GetNamespace(), virtualService, logger); err != nil {
@@ -142,6 +156,7 @@ func (r *TensorboardReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error)
 	return ctrl.Result{}, nil
 }
 
+// SetupWithManager sets up the controller with the Manager.
 func (r *TensorboardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&tensorboardv1alpha1.Tensorboard{}).
@@ -154,6 +169,10 @@ func generateDeployment(tb *tensorboardv1alpha1.Tensorboard, log logr.Logger, r 
 	var volumes []corev1.Volume
 	var mountpath, subpath string = tb.Spec.LogsPath, ""
 	var affinity = &corev1.Affinity{}
+	tensorboardImage, err := getEnvVariable("TENSORBOARD_IMAGE")
+	if err != nil {
+		return nil, err
+	}
 
 	//In this case, a PVC is used as a log storage for the Tensorboard server.
 	if !isCloudPath(tb.Spec.LogsPath) {
@@ -227,6 +246,13 @@ func generateDeployment(tb *tensorboardv1alpha1.Tensorboard, log logr.Logger, r 
 		})
 	}
 
+	// copy all of the CR labels to the pod which includes poddefault related labels
+	podLabels := map[string]string{}
+	for k, v := range tb.ObjectMeta.Labels {
+		(podLabels)[k] = v
+	}
+	(podLabels)["app"] = tb.Name
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tb.Name,
@@ -241,7 +267,7 @@ func generateDeployment(tb *tensorboardv1alpha1.Tensorboard, log logr.Logger, r 
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": tb.Name},
+					Labels: podLabels,
 				},
 				Spec: corev1.PodSpec{
 					Affinity:      affinity,
@@ -249,7 +275,7 @@ func generateDeployment(tb *tensorboardv1alpha1.Tensorboard, log logr.Logger, r 
 					Containers: []corev1.Container{
 						{
 							Name:            "tensorboard",
-							Image:           "tensorflow/tensorflow:2.1.0",
+							Image:           tensorboardImage,
 							ImagePullPolicy: "IfNotPresent",
 							Command:         []string{"/usr/local/bin/tensorboard"},
 							WorkingDir:      "/",
@@ -296,16 +322,25 @@ func generateVirtualService(tb *tensorboardv1alpha1.Tensorboard) (*unstructured.
 	prefix := fmt.Sprintf("/tensorboard/%s/%s/", tb.Namespace, tb.Name)
 	rewrite := "/"
 	service := fmt.Sprintf("%s.%s.svc.cluster.local", tb.Name, tb.Namespace)
+	istioGateway, err := getEnvVariable("ISTIO_GATEWAY")
+	if err != nil {
+		return nil, err
+	}
+
+	istioHost, err := getEnvVariable("ISTIO_HOST")
+	if err != nil {
+		return nil, err
+	}
 
 	vsvc := &unstructured.Unstructured{}
 	vsvc.SetAPIVersion("networking.istio.io/v1alpha3")
 	vsvc.SetKind("VirtualService")
 	vsvc.SetName(tb.Name)
 	vsvc.SetNamespace(tb.Namespace)
-	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{"*"}, "spec", "hosts"); err != nil {
+	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{istioHost}, "spec", "hosts"); err != nil {
 		return nil, fmt.Errorf("Set .spec.hosts error: %v", err)
 	}
-	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{"kubeflow/kubeflow-gateway"},
+	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{istioGateway},
 		"spec", "gateways"); err != nil {
 		return nil, fmt.Errorf("Set .spec.gateways error: %v", err)
 	}
@@ -497,4 +532,12 @@ func CopyDeploymentSetFields(from, to *appsv1.Deployment) bool {
 	to.Spec.Template.Spec.Affinity = from.Spec.Template.Spec.Affinity
 
 	return requireUpdate
+}
+
+func getEnvVariable(envVar string) (string, error) {
+	if lookupEnv, exists := os.LookupEnv(envVar); exists {
+		return lookupEnv, nil
+	} else {
+		return "", fmt.Errorf("environment variable %v is not set", envVar)
+	}
 }

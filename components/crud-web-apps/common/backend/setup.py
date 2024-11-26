@@ -8,11 +8,14 @@ REQUIRES = [
     "urllib3 >= 1.25.7",
     "Werkzeug >= 0.16.0",
     "Flask-Cors >= 3.0.8",
+    "gevent",
+    "prometheus-flask-exporter >= 0.23.1",
+    "importlib-metadata >= 1.0;python_version<'3.8'",
 ]
 
 setuptools.setup(
     name="kubeflow",
-    version="1.1",
+    version="1.2",
     author="kubeflow-dev-team",
     description="A package with a base Flask CRUD backend common code",
     packages=setuptools.find_packages(),

@@ -39,8 +39,13 @@ import './namespace-needed-view.js';
 import './manage-users-view.js';
 import './resources/kubeflow-icons.js';
 import './iframe-container.js';
+import './logout-button.js';
 import utilitiesMixin from './utilities-mixin.js';
 import {IFRAME_LINK_PREFIX} from './iframe-link.js';
+import {
+    ALL_NAMESPACES_ALLOWED_LIST, ALL_NAMESPACES,
+} from './namespace-selector';
+
 
 /**
  * Entry point for application UI.
@@ -83,7 +88,9 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
             errorText: {type: String, value: ''},
             buildVersion: {type: String, value: BUILD_VERSION},
             dashVersion: {type: String, value: VERSION},
+            logoutUrl: {type: String, value: '/logout'},
             platformInfo: Object,
+            metrics: Object,
             inIframe: {type: Boolean, value: false, readOnly: true},
             hideTabs: {type: Boolean, value: false, readOnly: true},
             hideSidebar: {type: Boolean, value: false, readOnly: true},
@@ -272,7 +279,7 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
                 hideSidebar = true;
             }
             if (path && path.includes('{ns}')) {
-                this.page = 'namespace_needed'
+                this.page = 'namespace_needed';
             } else {
                 this.page = 'not_found';
             }
@@ -293,11 +300,21 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
         if (!isIframe) {
             this.iframeSrc = 'about:blank';
         }
+        this._enableAllNamespaceOption();
     }
 
     _namespaceChanged(namespace) {
         // update namespaced menu item when namespace is changed
         // by namespace selector
+
+        if (namespace) {
+            // Save the user's choice so we are able to restore it,
+            // when re-loading the page without a queryParam
+            const localStorageKey = '/centraldashboard/selectedNamespace/' +
+                (this.user && '.' + this.user || '');
+            localStorage.setItem(localStorageKey, namespace);
+        }
+
         if (this.namespacedItemTemplete &&
             this.namespacedItemTemplete.includes('{ns}')) {
             this.set('subRouteData.path',
@@ -317,6 +334,25 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
         }
         return this.buildHref(href.replace('{ns}', queryParams['ns']),
             queryParams);
+    }
+
+    /**
+     * Parse namespace in external links
+     * @param {string} href - external link
+     * @param {Object} queryParamsChange - queryParams updated on-the-fly
+     * @return {string}
+     */
+    _buildExternalHref(href, queryParamsChange) {
+        // The "queryParams" value from "queryParamsChange" is not updated as
+        // expected in the "iframe-link", but it works in anchor element.
+        // A temporary workaround is  to use "this.queryParams" as an input
+        // instead of "queryParamsChange.base".
+        // const queryParams = queryParamsChange.base;
+        const queryParams = this.queryParams;
+        if (!queryParams || !queryParams['ns']) {
+            return href.replace('{ns}', '');
+        }
+        return href.replace('{ns}', queryParams['ns']);
     }
 
     /**
@@ -427,7 +463,16 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
     }
 
     _toggleMenuSection(e) {
-        e.target.nextElementSibling.toggle();
+        // look upwards until we find <paper-item>
+        let el = e.target;
+        while (el && el.tagName !== 'PAPER-ITEM') {
+            el = el.parentElement;
+        }
+
+        // if we found paper-item, the next sibling is the section
+        if (el) {
+            el.nextElementSibling.toggle();
+        }
     }
 
     /**
@@ -455,14 +500,62 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
             // This case is for non-identity networks, that have no namespaces
             this._setRegistrationFlow(true);
         }
-        this.ownedNamespace = namespaces.find((n) => n.role == 'owner');
+        const ownedNamespaces = [];
+        const editNamespaces = [];
+        const viewNamespaces = [];
+        if (this.namespaces.length) {
+            this.namespaces.forEach((ns) => {
+                if (ns.role === 'owner') {
+                    ownedNamespaces.push(ns);
+                } else if (ns.role === 'contributor') {
+                    editNamespaces.push(ns);
+                } else if (ns.role === 'viewer') {
+                    viewNamespaces.push(ns);
+                }
+            });
+            this.ownedNamespaces = ownedNamespaces;
+            this.editNamespaces = editNamespaces;
+            this.viewNamespaces = viewNamespaces;
+            this.hasNamespaces = true;
+        }
         this.platformInfo = platform;
         const kVer = this.platformInfo.kubeflowVersion;
         if (kVer && kVer != 'unknown') {
             this.buildVersion = this.platformInfo.kubeflowVersion;
         }
+        if (platform.logoutUrl) {
+            this.logoutUrl = platform.logoutUrl;
+        }
         // trigger template render
         this.menuLinks = JSON.parse(JSON.stringify(this.menuLinks));
+        this._enableAllNamespaceOption();
+    }
+
+    _enableAllNamespaceOption(iframeSrc) {
+        if (!iframeSrc) {
+            iframeSrc = this.iframeSrc;
+        }
+        if (!this.namespaces) {
+            return;
+        }
+        const allNamespaces = {
+            namespace: ALL_NAMESPACES,
+            role: '',
+            user: '',
+            disabled: true,
+        };
+        const namespaces = this.namespaces.filter(
+            (ns) => ns.namespace !== ALL_NAMESPACES
+        );
+
+        const allowedUIs = ALL_NAMESPACES_ALLOWED_LIST
+            .map((ui) => new URL(ui, window.location.origin).toString());
+
+        if (allowedUIs.find((ui)=>iframeSrc.startsWith(ui))) {
+            allNamespaces.disabled = false;
+        }
+
+        this.namespaces = [allNamespaces, ...namespaces];
     }
 }
 

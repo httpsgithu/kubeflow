@@ -1,26 +1,26 @@
-FROM public.ecr.aws/j1r0q0g6/notebooks/notebook-servers/base:master-6c41e72b
+#
+# NOTE: Use the Makefiles to build this image correctly.
+#
+
+ARG BASE_IMG=<base>
+FROM $BASE_IMG
+
+ARG TARGETARCH
+
+# args - software versions
+# https://github.com/coder/code-server/releases
+ARG CODESERVER_VERSION=4.93.1
 
 USER root
 
-# args - software versions
- # renovate: datasource=github-tags depName=cdr/code-server versioning=semver
-ARG CODESERVER_VERSION=v3.10.2
-
 # install - code-server
-RUN curl -sL "https://github.com/cdr/code-server/releases/download/${CODESERVER_VERSION}/code-server_${CODESERVER_VERSION/v/}_amd64.deb" -o /tmp/code-server.deb \
+RUN curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODESERVER_VERSION}/code-server_${CODESERVER_VERSION}_${TARGETARCH}.deb" -o /tmp/code-server.deb \
  && dpkg -i /tmp/code-server.deb \
  && rm -f /tmp/code-server.deb
 
 # s6 - copy scripts
-COPY --chown=jovyan:users s6/ /etc
-
-# s6 - 01-copy-tmp-home
-RUN mkdir -p /tmp_home \
- && cp -r ${HOME} /tmp_home \
- && chown -R ${NB_USER}:users /tmp_home
+COPY --chown=${NB_USER}:${NB_GID} --chmod=755 s6/ /etc
 
 USER $NB_UID
 
 EXPOSE 8888
-
-ENTRYPOINT ["/init"]

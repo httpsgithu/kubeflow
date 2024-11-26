@@ -16,7 +16,7 @@ class BackendMode(enum.Enum):
 
 def dev_mode_enabled():
     env = current_app.config.get("ENV")
-    return (env == BackendMode.DEVELOPMENT_FULL.value or
+    return (env == BackendMode.DEVELOPMENT_FULL.value or  # noqa: W504
             env == BackendMode.DEVELOPMENT.value)
 
 
@@ -43,10 +43,13 @@ class Config(object):
     JSONIFY_PRETTYPRINT_REGULAR = True
     LOG_LEVEL = logging.INFO
     PREFIX = "/"
+    METRICS: bool = True
 
     def __init__(self):
         if os.environ.get("LOG_LEVEL_DEBUG", "false") == "true":
             self.LOG_LEVEL = logging.DEBUG
+
+        self.METRICS = bool(os.environ.get("METRICS", True))
 
 
 class DevConfig(Config):

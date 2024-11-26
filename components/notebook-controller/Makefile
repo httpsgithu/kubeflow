@@ -1,10 +1,13 @@
-
 # Image URL to use all building/pushing image targets
-IMG ?= public.ecr.aws/j1r0q0g6/notebooks/notebook-controller
-TAG ?= $(shell git describe --tags --always)
+IMG ?= notebook-controller
+TAG ?= $(shell git describe --tags --always --dirty)
+ARCH ?= linux/amd64
 
-# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.22
+# Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
+CRD_OPTIONS ?= "crd"
+
+# Based on recommendation https://sdk.operatorframework.io/docs/building-operators/golang/references/envtest-setup/
+ENVTEST_ASSETS_DIR=$(shell pwd)/testbin
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -63,9 +66,8 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
-
-##@ Build
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -v ./... -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -v ./controllers/... -coverprofile cover.out
 
 .PHONY: manager
 manager: generate fmt vet ## Build manager binary.
@@ -75,13 +77,34 @@ manager: generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./main.go
 
+# Run the controller locally with culling enabled
+.PHONY: run-culling
+run-culling: generate fmt vet manifests
+	ENABLE_CULLING=true \
+	CLUSTER_DOMAIN=cluster.local \
+	CULL_IDLE_TIME=10 \
+	IDLENESS_CHECK_PERIOD=1 \
+	DEV=true \
+	go run ./main.go
+
+##@ Build
 .PHONY: docker-build
-docker-build: test ## Build docker image with the manager.
+docker-build: ## Build docker image with the manager.
 	cd .. && docker build . -t ${IMG}:${TAG} -f ./notebook-controller/Dockerfile
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push ${IMG}:${TAG}
+
+.PHONY: docker-build-multi-arch
+docker-build-multi-arch: ##  Build multi-arch docker images with docker buildx
+	cd .. && docker buildx build --load --platform ${ARCH} --tag ${IMG}:${TAG} -f ./notebook-controller/Dockerfile .
+
+
+.PHONY: docker-build-push-multi-arch
+docker-build-push-multi-arch: ## Build multi-arch docker images with docker buildx and push to docker registry 
+	cd .. && docker buildx build --platform ${ARCH} --tag ${IMG}:${TAG} --push -f ./notebook-controller/Dockerfile .
+
 
 .PHONY: image
 image: docker-build docker-push ## Build and push docker image with the manager.
@@ -101,7 +124,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	$(KUSTOMIZE) build config/crd | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: docker-build docker-push manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	sed -i'' -e 's@newName: .*@newName: '"${IMG}"'@' ./config/base/kustomization.yaml
 	sed -i'' -e 's@newTag: .*@newTag: '"${TAG}"'@' ./config/base/kustomization.yaml
 	$(KUSTOMIZE) build config/base | kubectl apply -f -
@@ -121,20 +144,18 @@ kustomize: ## Download kustomize locally if necessary.
 	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/v3/cmd/kustomize@v3.2.0)
 
 ENVTEST = $(shell pwd)/bin/setup-envtest
+ENVTEST_VERSION?=release-0.14
+
 .PHONY: envtest
 envtest: ## Download envtest-setup locally if necessary.
-	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@latest)
+	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION))
 
 # go-get-tool will 'go get' any package $2 and install it to $1.
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 define go-get-tool
 @[ -f $(1) ] || { \
 set -e ;\
-TMP_DIR=$$(mktemp -d) ;\
-cd $$TMP_DIR ;\
-go mod init tmp ;\
 echo "Downloading $(2)" ;\
-GOBIN=$(PROJECT_DIR)/bin go get $(2) ;\
-rm -rf $$TMP_DIR ;\
+GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
 }
 endef

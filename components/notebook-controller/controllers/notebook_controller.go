@@ -20,12 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	reconcilehelper "github.com/kubeflow/kubeflow/components/common/reconcilehelper"
 	"github.com/kubeflow/kubeflow/components/notebook-controller/api/v1beta1"
-	"github.com/kubeflow/kubeflow/components/notebook-controller/pkg/culler"
 	"github.com/kubeflow/kubeflow/components/notebook-controller/pkg/metrics"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -79,7 +80,7 @@ type NotebookReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs="*"
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs="*"
 // +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks;notebooks/status;notebooks/finalizers,verbs="*"
@@ -87,6 +88,7 @@ type NotebookReconciler struct {
 
 func (r *NotebookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("notebook", req.NamespacedName)
+	log.Info("Reconciliation loop started")
 
 	// TODO(yanniszark): Can we avoid reconciling Events and Notebook in the same queue?
 	event := &corev1.Event{}
@@ -119,11 +121,18 @@ func (r *NotebookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, getEventErr
 	}
 	// If not found, continue. Is not an event.
-
 	instance := &v1beta1.Notebook{}
 	if err := r.Get(ctx, req.NamespacedName, instance); err != nil {
 		log.Error(err, "unable to fetch Notebook")
 		return ctrl.Result{}, ignoreNotFound(err)
+	}
+
+	// jupyter-web-app deletes objects using foreground deletion policy, Notebook CR will stay until all owned objects are deleted
+	// reconcile loop might keep on trying to recreate the resources that the API server tries to delete.
+	// so when Notebook CR is terminating, reconcile loop should do nothing
+
+	if !instance.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
 	}
 
 	// Reconcile StatefulSet
@@ -177,7 +186,7 @@ func (r *NotebookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, err
 		}
 	} else if err != nil {
-		log.Error(err, "error getting Statefulset")
+		log.Error(err, "error getting Service")
 		return ctrl.Result{}, err
 	}
 	// Update the foundService object and write the result back if there are any changes
@@ -198,149 +207,139 @@ func (r *NotebookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
-	// Update the readyReplicas if the status is changed
-	if foundStateful.Status.ReadyReplicas != instance.Status.ReadyReplicas {
-		log.Info("Updating Status", "namespace", instance.Namespace, "name", instance.Name)
-		instance.Status.ReadyReplicas = foundStateful.Status.ReadyReplicas
-		err = r.Status().Update(ctx, instance)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Check the pod status
-	pod := &corev1.Pod{}
-	podFound := false
-	err = r.Get(ctx, types.NamespacedName{Name: ss.Name + "-0", Namespace: ss.Namespace}, pod)
+	foundPod := &corev1.Pod{}
+	err = r.Get(ctx, types.NamespacedName{Name: ss.Name + "-0", Namespace: ss.Namespace}, foundPod)
 	if err != nil && apierrs.IsNotFound(err) {
-		// This should be reconciled by the StatefulSet
-		log.Info("Pod not found...")
+		log.Info(fmt.Sprintf("No Pods are currently running for Notebook Server: %s in namespace: %s.", instance.Name, instance.Namespace))
 	} else if err != nil {
 		return ctrl.Result{}, err
-	} else {
-		// Got the pod
-		podFound = true
-
-		// Update status of the CR using the ContainerState of
-		// the container that has the same name as the CR.
-		// If no container of same name is found, the state of the CR is not updated.
-		if len(pod.Status.ContainerStatuses) > 0 {
-			notebookContainerFound := false
-			for i := range pod.Status.ContainerStatuses {
-				if pod.Status.ContainerStatuses[i].Name != instance.Name {
-					continue
-				}
-				if pod.Status.ContainerStatuses[i].State == instance.Status.ContainerState {
-					continue
-				}
-
-				log.Info("Updating Notebook CR state: ", "namespace", instance.Namespace, "name", instance.Name)
-				cs := pod.Status.ContainerStatuses[i].State
-				instance.Status.ContainerState = cs
-				oldConditions := instance.Status.Conditions
-				newCondition := getNextCondition(cs)
-				// Append new condition
-				if len(oldConditions) == 0 || oldConditions[0].Type != newCondition.Type ||
-					oldConditions[0].Reason != newCondition.Reason ||
-					oldConditions[0].Message != newCondition.Message {
-					log.Info("Appending to conditions: ", "namespace", instance.Namespace, "name", instance.Name, "type", newCondition.Type, "reason", newCondition.Reason, "message", newCondition.Message)
-					instance.Status.Conditions = append([]v1beta1.NotebookCondition{newCondition}, oldConditions...)
-				}
-				err = r.Status().Update(ctx, instance)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				notebookContainerFound = true
-				break
-
-			}
-			if !notebookContainerFound {
-				log.Error(nil, "Could not find the Notebook container, will not update the status of the CR. No container has the same name as the CR.", "CR name:", instance.Name)
-			}
-		}
 	}
 
-	if !podFound {
-		// Delete LAST_ACTIVITY_ANNOTATION annotations for CR objects
-		// that do not have a pod.
-		log.Info("Notebook has not Pod running. Will remove last-activity annotation")
-		meta := instance.ObjectMeta
-		if meta.GetAnnotations() == nil {
-			log.Info("No annotations found")
-			return ctrl.Result{}, nil
-		}
-
-		if _, ok := meta.GetAnnotations()[culler.LAST_ACTIVITY_ANNOTATION]; !ok {
-			log.Info("No last-activity annotations found")
-			return ctrl.Result{}, nil
-		}
-
-		log.Info("Removing last-activity annotation")
-		delete(meta.GetAnnotations(), culler.LAST_ACTIVITY_ANNOTATION)
-		err = r.Update(ctx, instance)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-
+	// Update Notebook CR status
+	err = updateNotebookStatus(r, instance, foundStateful, foundPod, req)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Pod is found
-	// Check if the Notebook needs to be stopped
-	// Update the LAST_ACTIVITY_ANNOTATION
-	if culler.UpdateNotebookLastActivityAnnotation(&instance.ObjectMeta) {
-		err = r.Update(ctx, instance)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Check if the Notebook needs to be stopped
-	if culler.NotebookNeedsCulling(instance.ObjectMeta) {
-		log.Info(fmt.Sprintf(
-			"Notebook %s/%s needs culling. Setting annotations",
-			instance.Namespace, instance.Name))
-
-		// Set annotations to the Notebook
-		culler.SetStopAnnotation(&instance.ObjectMeta, r.Metrics)
-		r.Metrics.NotebookCullingCount.WithLabelValues(instance.Namespace, instance.Name).Inc()
-		err = r.Update(ctx, instance)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else if !culler.StopAnnotationIsSet(instance.ObjectMeta) {
-		// The Pod is either too fresh, or the idle time has passed and it has
-		// received traffic. In this case we will be periodically checking if
-		// it needs culling.
-		return ctrl.Result{RequeueAfter: culler.GetRequeueTime()}, nil
-	}
-	return ctrl.Result{RequeueAfter: culler.GetRequeueTime()}, nil
+	return ctrl.Result{}, nil
 }
 
-func getNextCondition(cs corev1.ContainerState) v1beta1.NotebookCondition {
-	var nbtype = ""
-	var nbreason = ""
-	var nbmsg = ""
+func updateNotebookStatus(r *NotebookReconciler, nb *v1beta1.Notebook,
+	sts *appsv1.StatefulSet, pod *corev1.Pod, req ctrl.Request) error {
 
-	if cs.Running != nil {
-		nbtype = "Running"
-	} else if cs.Waiting != nil {
-		nbtype = "Waiting"
-		nbreason = cs.Waiting.Reason
-		nbmsg = cs.Waiting.Message
+	log := r.Log.WithValues("notebook", req.NamespacedName)
+	ctx := context.Background()
+
+	status, err := createNotebookStatus(r, nb, sts, pod, req)
+	if err != nil {
+		return err
+	}
+
+	log.Info("Updating Notebook CR Status", "status", status)
+	nb.Status = status
+	return r.Status().Update(ctx, nb)
+}
+
+func createNotebookStatus(r *NotebookReconciler, nb *v1beta1.Notebook,
+	sts *appsv1.StatefulSet, pod *corev1.Pod, req ctrl.Request) (v1beta1.NotebookStatus, error) {
+
+	log := r.Log.WithValues("notebook", req.NamespacedName)
+
+	// Initialize Notebook CR Status
+	log.Info("Initializing Notebook CR Status")
+	status := v1beta1.NotebookStatus{
+		Conditions:     make([]v1beta1.NotebookCondition, 0),
+		ReadyReplicas:  sts.Status.ReadyReplicas,
+		ContainerState: corev1.ContainerState{},
+	}
+
+	// Update the status based on the Pod's status
+	if reflect.DeepEqual(pod.Status, corev1.PodStatus{}) {
+		log.Info("No pod.Status found. Won't update notebook conditions and containerState")
+		return status, nil
+	}
+
+	// Update status of the CR using the ContainerState of
+	// the container that has the same name as the CR.
+	// If no container of same name is found, the state of the CR is not updated.
+	notebookContainerFound := false
+	log.Info("Calculating Notebook's  containerState")
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name != nb.Name {
+			continue
+		}
+
+		if pod.Status.ContainerStatuses[i].State == nb.Status.ContainerState {
+			continue
+		}
+
+		// Update Notebook CR's status.ContainerState
+		cs := pod.Status.ContainerStatuses[i].State
+		log.Info("Updating Notebook CR state: ", "state", cs)
+
+		status.ContainerState = cs
+		notebookContainerFound = true
+		break
+	}
+
+	if !notebookContainerFound {
+		log.Error(nil, "Could not find container with the same name as Notebook "+
+			"in containerStates of Pod. Will not update notebook's "+
+			"status.containerState ")
+	}
+
+	// Mirroring pod condition
+	notebookConditions := []v1beta1.NotebookCondition{}
+	log.Info("Calculating Notebook's Conditions")
+	for i := range pod.Status.Conditions {
+		condition := PodCondToNotebookCond(pod.Status.Conditions[i])
+		notebookConditions = append(notebookConditions, condition)
+	}
+
+	status.Conditions = notebookConditions
+
+	return status, nil
+}
+
+func PodCondToNotebookCond(podc corev1.PodCondition) v1beta1.NotebookCondition {
+
+	condition := v1beta1.NotebookCondition{}
+
+	if len(podc.Type) > 0 {
+		condition.Type = string(podc.Type)
+	}
+
+	if len(podc.Status) > 0 {
+		condition.Status = string(podc.Status)
+	}
+
+	if len(podc.Message) > 0 {
+		condition.Message = podc.Message
+	}
+
+	if len(podc.Reason) > 0 {
+		condition.Reason = podc.Reason
+	}
+
+	// check if podc.LastProbeTime is null. If so initialize
+	// the field with metav1.Now()
+	check := podc.LastProbeTime.Time.Equal(time.Time{})
+	if !check {
+		condition.LastProbeTime = podc.LastProbeTime
 	} else {
-		nbtype = "Terminated"
-		nbreason = cs.Terminated.Reason
-		nbmsg = cs.Terminated.Reason
+		condition.LastProbeTime = metav1.Now()
 	}
 
-	newCondition := v1beta1.NotebookCondition{
-		Type:          nbtype,
-		LastProbeTime: metav1.Now(),
-		Reason:        nbreason,
-		Message:       nbmsg,
+	// check if podc.LastTransitionTime is null. If so initialize
+	// the field with metav1.Now()
+	check = podc.LastTransitionTime.Time.Equal(time.Time{})
+	if !check {
+		condition.LastTransitionTime = podc.LastTransitionTime
+	} else {
+		condition.LastTransitionTime = metav1.Now()
 	}
-	return newCondition
+
+	return condition
 }
 
 func setPrefixEnvVar(instance *v1beta1.Notebook, container *corev1.Container) {
@@ -361,7 +360,7 @@ func setPrefixEnvVar(instance *v1beta1.Notebook, container *corev1.Container) {
 
 func generateStatefulSet(instance *v1beta1.Notebook) *appsv1.StatefulSet {
 	replicas := int32(1)
-	if culler.StopAnnotationIsSet(instance.ObjectMeta) {
+	if metav1.HasAnnotation(instance.ObjectMeta, "kubeflow-resource-stopped") {
 		replicas = 0
 	}
 
@@ -378,18 +377,30 @@ func generateStatefulSet(instance *v1beta1.Notebook) *appsv1.StatefulSet {
 				},
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-					"statefulset":   instance.Name,
-					"notebook-name": instance.Name,
-				}},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"statefulset":   instance.Name,
+						"notebook-name": instance.Name,
+					},
+					Annotations: map[string]string{},
+				},
 				Spec: *instance.Spec.Template.Spec.DeepCopy(),
 			},
 		},
 	}
+
 	// copy all of the Notebook labels to the pod including poddefault related labels
 	l := &ss.Spec.Template.ObjectMeta.Labels
 	for k, v := range instance.ObjectMeta.Labels {
 		(*l)[k] = v
+	}
+
+	// copy all of the Notebook annotations to the pod.
+	a := &ss.Spec.Template.ObjectMeta.Annotations
+	for k, v := range instance.ObjectMeta.Annotations {
+		if !strings.Contains(k, "kubectl") && !strings.Contains(k, "notebook") {
+			(*a)[k] = v
+		}
 	}
 
 	podSpec := &ss.Spec.Template.Spec
@@ -485,8 +496,14 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 	vsvc.SetKind("VirtualService")
 	vsvc.SetName(virtualServiceName(name, namespace))
 	vsvc.SetNamespace(namespace)
-	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{"*"}, "spec", "hosts"); err != nil {
+
+	istioHost := os.Getenv("ISTIO_HOST")
+	if len(istioHost) == 0 {
+		istioHost = "*"
+	}
+	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{istioHost}, "spec", "hosts"); err != nil {
 		return nil, fmt.Errorf("Set .spec.hosts error: %v", err)
+
 	}
 
 	istioGateway := os.Getenv("ISTIO_GATEWAY")
@@ -495,7 +512,7 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 	}
 	if err := unstructured.SetNestedStringSlice(vsvc.Object, []string{istioGateway},
 		"spec", "gateways"); err != nil {
-		return nil, fmt.Errorf("Set .spec.gateways error: %v", err)
+		return nil, fmt.Errorf("set .spec.gateways error: %v", err)
 	}
 
 	headersRequestSet := make(map[string]string)
@@ -546,7 +563,7 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 
 	// add http section to istio VirtualService spec
 	if err := unstructured.SetNestedSlice(vsvc.Object, http, "spec", "http"); err != nil {
-		return nil, fmt.Errorf("Set .spec.http error: %v", err)
+		return nil, fmt.Errorf("set .spec.http error: %v", err)
 	}
 
 	return vsvc, nil
@@ -556,6 +573,10 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 func (r *NotebookReconciler) reconcileVirtualService(instance *v1beta1.Notebook) error {
 	log := r.Log.WithValues("notebook", instance.Namespace)
 	virtualService, err := generateVirtualService(instance)
+	if err != nil {
+		log.Info("Unable to generate VirtualService...", err)
+		return err
+	}
 	if err := ctrl.SetControllerReference(instance, virtualService, r.Scheme); err != nil {
 		return err
 	}

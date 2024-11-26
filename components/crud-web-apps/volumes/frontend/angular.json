@@ -1,5 +1,8 @@
 {
   "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
+  "cli": {
+    "analytics": false
+  },
   "version": 1,
   "newProjectRoot": "projects",
   "projects": {
@@ -23,67 +26,43 @@
         "build": {
           "builder": "@angular-devkit/build-angular:browser",
           "options": {
+            "allowedCommonJsDependencies": [
+              "date-fns",
+              "lodash"
+            ],
             "preserveSymlinks": true,
             "outputPath": "dist/frontend",
             "index": "src/index.html",
             "main": "src/main.ts",
             "polyfills": "src/polyfills.ts",
             "tsConfig": "tsconfig.app.json",
-            "assets": ["src/favicon.ico", "src/assets"],
+            "assets": [
+              "src/favicon.ico",
+              "src/assets",
+              {
+                "glob": "**/*",
+                "input": "node_modules/monaco-editor",
+                "output": "assets/monaco-editor"
+              }
+            ],
             "styles": ["src/styles.scss"],
             "scripts": [],
             "crossOrigin": "use-credentials",
             "vendorChunk": true,
             "extractLicenses": false,
             "buildOptimizer": false,
-            "sourceMap": true,
+            "sourceMap": {
+              "scripts": true,
+              "styles": true,
+              "hidden": false,
+              "vendor": true
+            },
             "optimization": false,
             "namedChunks": true
           },
           "configurations": {
             "fr": {
               "localize": ["fr"]
-            },
-            "rok": {
-              "budgets": [
-                {
-                  "type": "anyComponentStyle",
-                  "maximumWarning": "6kb"
-                }
-              ],
-              "fileReplacements": [
-                {
-                  "replace": "src/environments/environment.ts",
-                  "with": "src/environments/environment.rok.ts"
-                }
-              ]
-            },
-            "rok-prod": {
-              "fileReplacements": [
-                {
-                  "replace": "src/environments/environment.ts",
-                  "with": "src/environments/environment.rok.prod.ts"
-                }
-              ],
-              "optimization": true,
-              "outputHashing": "all",
-              "sourceMap": false,
-              "namedChunks": false,
-              "extractLicenses": true,
-              "vendorChunk": false,
-              "buildOptimizer": true,
-              "budgets": [
-                {
-                  "type": "initial",
-                  "maximumWarning": "2mb",
-                  "maximumError": "5mb"
-                },
-                {
-                  "type": "anyComponentStyle",
-                  "maximumWarning": "6kb",
-                  "maximumError": "10kb"
-                }
-              ]
             },
             "production": {
               "fileReplacements": [
@@ -94,7 +73,12 @@
               ],
               "optimization": true,
               "outputHashing": "all",
-              "sourceMap": false,
+              "sourceMap": {
+                "scripts": true,
+                "styles": true,
+                "hidden": false,
+                "vendor": true
+              },
               "namedChunks": false,
               "extractLicenses": true,
               "vendorChunk": false,
@@ -124,9 +108,6 @@
             "production": {
               "browserTarget": "frontend:build:production"
             },
-            "rok": {
-              "browserTarget": "frontend:build:rok"
-            },
             "fr": {
               "browserTarget": "frontend:build:fr",
               "proxyConfig": "src/proxy.conf.json"
@@ -148,34 +129,21 @@
             "karmaConfig": "karma.conf.js",
             "assets": ["src/favicon.ico", "src/assets"],
             "styles": ["src/styles.scss"],
-            "scripts": []
+            "scripts": [],
+            "preserveSymlinks": true
           }
         },
         "lint": {
-          "builder": "@angular-devkit/build-angular:tslint",
+          "builder": "@angular-eslint/builder:lint",
           "options": {
-            "tsConfig": [
-              "tsconfig.app.json",
-              "tsconfig.spec.json",
-              "e2e/tsconfig.json"
-            ],
-            "exclude": ["**/node_modules/**"]
-          }
-        },
-        "e2e": {
-          "builder": "@angular-devkit/build-angular:protractor",
-          "options": {
-            "protractorConfig": "e2e/protractor.conf.js",
-            "devServerTarget": "frontend:serve"
-          },
-          "configurations": {
-            "production": {
-              "devServerTarget": "frontend:serve:production"
-            }
+            "lintFilePatterns": ["src/**/*.ts", "src/**/*.html"]
           }
         }
       }
     }
   },
-  "defaultProject": "frontend"
+  "defaultProject": "frontend",
+  "cli": {
+    "defaultCollection": "@angular-eslint/schematics"
+  }
 }

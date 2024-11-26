@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Kubeflow Authors.
+Copyright 2022.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -25,11 +26,11 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff"
-	"github.com/fsnotify/fsnotify"
-	"github.com/ghodss/yaml"
 	"github.com/go-logr/logr"
 	profilev1 "github.com/kubeflow/kubeflow/components/profile-controller/api/v1"
 	"github.com/pkg/errors"
+	"gopkg.in/fsnotify.v1"
+	"gopkg.in/yaml.v2"
 	istioSecurity "istio.io/api/security/v1beta1"
 	istioSecurityClient "istio.io/client-go/pkg/apis/security/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -44,7 +45,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -102,8 +102,7 @@ type ProfileReconciler struct {
 // Reconcile reads that state of the cluster for a Profile object and makes changes based on the state read
 // and what is in the Profile.Spec
 // Automatically generate RBAC rules to allow the Controller to read and write Deployments
-func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error) {
-	ctx := context.Background()
+func (r *ProfileReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	logger := r.Log.WithValues("profile", request.NamespacedName)
 	defaultKubeflowNamespaceLabels := r.readDefaultLabelsFromFile(r.DefaultNamespaceLabelsPath)
 
@@ -265,7 +264,19 @@ func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error)
 			return reconcile.Result{}, err
 		}
 	} else {
-		logger.Info("No update on resource quota", "spec", instance.Spec.ResourceQuotaSpec.String())
+		found := &corev1.ResourceQuota{}
+		err := r.Get(ctx, types.NamespacedName{Name: KFQUOTA, Namespace: instance.Name}, found)
+		if err == nil {
+			if err := r.Delete(ctx, found); err != nil {
+				logger.Error(err, "error deleting resource quota", "namespace", instance.Name)
+				return ctrl.Result{}, err
+			}
+		} else if !apierrors.IsNotFound(err) {
+			logger.Error(err, "error getting resource quota", "namespace", instance.Name)
+			return ctrl.Result{}, err
+		} else {
+			logger.Info("No update on resource quota", "spec", instance.Spec.ResourceQuotaSpec.String())
+		}
 	}
 	if err := r.PatchDefaultPluginSpec(ctx, instance); err != nil {
 		IncRequestErrorCounter("error patching DefaultPluginSpec", SEVERITY_MAJOR)
@@ -335,32 +346,13 @@ func (r *ProfileReconciler) appendErrorConditionAndReturn(ctx context.Context, i
 	return reconcile.Result{}, nil
 }
 
-// ProfileMapper maps an event to a reconciliation of all existing Profiles.
-type ProfileMapper struct {
-	client client.Client
-	logger logr.Logger
-}
-
-var _ inject.Client = (*ProfileMapper)(nil)
-
-func (i *ProfileMapper) InjectClient(c client.Client) error {
-	i.client = c
-	return nil
-}
-
-var _ inject.Logger = (*ProfileMapper)(nil)
-
-func (i *ProfileMapper) InjectLogger(l logr.Logger) error {
-	i.logger = l
-	return nil
-}
-
-func (i *ProfileMapper) Map(a handler.MapObject) []reconcile.Request {
+// mapEventToRequest maps an event to reconcile requests for all Profiles
+func (r *ProfileReconciler) mapEventToRequest(o client.Object) []reconcile.Request {
 	req := []reconcile.Request{}
 	profileList := &profilev1.ProfileList{}
-	err := i.client.List(context.TODO(), profileList)
+	err := r.Client.List(context.TODO(), profileList)
 	if err != nil {
-		i.logger.Error(err, "Failed to list profiles in order to trigger reconciliation")
+		r.Log.Error(err, "Failed to list profiles in order to trigger reconciliation")
 		return req
 	}
 	for _, p := range profileList.Items {
@@ -406,7 +398,7 @@ func (r *ProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}(watcher, events)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	c := ctrl.NewControllerManagedBy(mgr).
 		For(&profilev1.Profile{}).
 		Owns(&corev1.Namespace{}).
 		Owns(&istioSecurityClient.AuthorizationPolicy{}).
@@ -414,14 +406,29 @@ func (r *ProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.RoleBinding{}).
 		Watches(
 			&source.Channel{Source: events},
-			&handler.EnqueueRequestsFromMapFunc{
-				ToRequests: &ProfileMapper{},
-			},
-		).
-		Complete(r)
+			handler.EnqueueRequestsFromMapFunc(r.mapEventToRequest),
+		)
+
+	err = c.Complete(r)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile) istioSecurity.AuthorizationPolicy {
+	nbControllerPrincipal := GetEnvDefault(
+		"NOTEBOOK_CONTROLLER_PRINCIPAL",
+		"cluster.local/ns/kubeflow/sa/notebook-controller-service-account")
+
+	istioIGWPrincipal := GetEnvDefault(
+		"ISTIO_INGRESS_GATEWAY_PRINCIPAL",
+		"cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account")
+
+	kfpUIPrincipal := GetEnvDefault(
+		"KFP_UI_PRINCIPAL",
+		"cluster.local/ns/kubeflow/sa/ml-pipeline-ui")
+
 	return istioSecurity.AuthorizationPolicy{
 		Action: istioSecurity.AuthorizationPolicy_ALLOW,
 		// Empty selector == match all workloads in namespace
@@ -438,6 +445,14 @@ func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile
 						},
 					},
 				},
+				From: []*istioSecurity.Rule_From{{
+					Source: &istioSecurity.Source{
+						Principals: []string{
+							istioIGWPrincipal,
+							kfpUIPrincipal,
+						},
+					},
+				}},
 			},
 			{
 				When: []*istioSecurity.Condition{
@@ -471,7 +486,7 @@ func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile
 				From: []*istioSecurity.Rule_From{
 					{
 						Source: &istioSecurity.Source{
-							Principals: []string{"cluster.local/ns/kubeflow/sa/notebook-controller-service-account"},
+							Principals: []string{nbControllerPrincipal},
 						},
 					},
 				},
@@ -527,8 +542,8 @@ func (r *ProfileReconciler) updateIstioAuthorizationPolicy(profileIns *profilev1
 			return err
 		}
 	} else {
-		if !reflect.DeepEqual(istioAuth.Spec, foundAuthorizationPolicy.Spec) {
-			foundAuthorizationPolicy.Spec = istioAuth.Spec
+		if !reflect.DeepEqual(*istioAuth.Spec.DeepCopy(), *foundAuthorizationPolicy.Spec.DeepCopy()) {
+			foundAuthorizationPolicy.Spec = *istioAuth.Spec.DeepCopy()
 			logger.Info("Updating Istio AuthorizationPolicy", "namespace", istioAuth.ObjectMeta.Namespace,
 				"name", istioAuth.ObjectMeta.Name)
 			err = r.Update(context.TODO(), foundAuthorizationPolicy)
@@ -674,14 +689,14 @@ func (r *ProfileReconciler) GetPluginSpec(profileIns *profilev1.Profile) ([]Plug
 
 		// To deserialize it to a specific type we need to first serialize it to bytes
 		// and then unserialize it.
-		specBytes, err := yaml.Marshal(p.Spec)
+		specBytes, err := json.Marshal(p.Spec)
 
 		if err != nil {
 			logger.Info("Could not marshal plugin ", p.Kind, "; error: ", err)
 			return nil, err
 		}
 
-		err = yaml.Unmarshal(specBytes, pluginIns)
+		err = json.Unmarshal(specBytes, pluginIns)
 		if err != nil {
 			logger.Info("Could not unmarshal plugin ", p.Kind, "; error: ", err)
 			return nil, err
@@ -772,4 +787,12 @@ func (r *ProfileReconciler) readDefaultLabelsFromFile(path string) map[string]st
 		os.Exit(1)
 	}
 	return labels
+}
+
+func GetEnvDefault(variable string, defaultVal string) string {
+	envVar := os.Getenv(variable)
+	if len(envVar) == 0 {
+		return defaultVal
+	}
+	return envVar
 }

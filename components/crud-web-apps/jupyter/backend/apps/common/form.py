@@ -1,8 +1,7 @@
 import json
 
-from werkzeug.exceptions import BadRequest
-
 from kubeflow.kubeflow.crud_backend import logging
+from werkzeug.exceptions import BadRequest
 
 from . import utils
 
@@ -82,7 +81,8 @@ def set_notebook_image(notebook, body, defaults):
         image_body_field = "customImage"
 
     image = get_form_value(body, defaults, image_body_field, "image")
-    notebook["spec"]["template"]["spec"]["containers"][0]["image"] = image
+    container = notebook["spec"]["template"]["spec"]["containers"][0]
+    container["image"] = image.strip()
 
 
 def set_notebook_image_pull_policy(notebook, body, defaults):
@@ -240,7 +240,7 @@ def set_notebook_gpus(notebook, body, defaults):
     container = notebook["spec"]["template"]["spec"]["containers"][0]
     vendor = gpus["vendor"]
     try:
-        num = int(gpus["num"])
+        num = str(gpus["num"])
     except ValueError:
         raise BadRequest("gpus.num is not a valid number: %s" % gpus["num"])
 

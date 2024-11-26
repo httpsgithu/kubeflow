@@ -1,5 +1,5 @@
 # --- Build the backend kubeflow-wheel ---
-FROM python:3.8-slim-buster AS backend-kubeflow-wheel
+FROM python:3.10-slim AS backend-kubeflow-wheel
 
 WORKDIR /src
 
@@ -7,7 +7,7 @@ COPY ./common/backend/ .
 RUN python3 setup.py bdist_wheel
 
 # --- Build the frontend kubeflow library ---
-FROM node:12-buster-slim as frontend-kubeflow-lib
+FROM node:16.20.2-bullseye as frontend-kubeflow-lib
 
 WORKDIR /src
 
@@ -22,7 +22,7 @@ COPY ./common/frontend/kubeflow-common-lib/tsconfig.json .
 RUN npm run build
 
 # --- Build the frontend ---
-FROM node:12-buster-slim as frontend
+FROM node:16.20.2-bullseye as frontend
 
 WORKDIR /src
 
@@ -41,7 +41,7 @@ COPY --from=frontend-kubeflow-lib /src/dist/kubeflow/ ./node_modules/kubeflow/
 RUN npm run build -- --output-path=./dist --configuration=production
 
 # Web App
-FROM python:3.8-slim-buster
+FROM python:3.10-slim
 
 WORKDIR /package
 COPY --from=backend-kubeflow-wheel /src .

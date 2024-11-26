@@ -1,6 +1,5 @@
 # Build the manager binary
-ARG GOLANG_VERSION=1.15
-FROM golang:${GOLANG_VERSION} as builder
+FROM golang:1.17 as builder
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -17,11 +16,7 @@ COPY controllers/ controllers/
 RUN cp /bin/dash /workspace/dash
 
 # Build
-RUN if [ "$(uname -m)" = "aarch64" ]; then \
-        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GO111MODULE=on go build -a -o manager main.go; \
-    else \
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -o manager main.go; \
-    fi
+RUN CGO_ENABLED=0 GOOS=linux GO111MODULE=on go build -a -o manager main.go;
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -36,3 +31,4 @@ COPY --from=builder /go/pkg/mod/github.com/hashicorp third_party/library/
 EXPOSE 8080
 
 ENTRYPOINT ["/manager"]
+

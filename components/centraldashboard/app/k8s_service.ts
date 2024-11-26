@@ -2,7 +2,8 @@ import * as k8s from '@kubernetes/client-node';
 
 /** Retrieve Dashboard configmap Name */
 const {
-  DASHBOARD_CONFIGMAP = "centraldashboard-config"
+  DASHBOARD_CONFIGMAP = "centraldashboard-config",
+  LOGOUT_URL = '/logout'
 } = process.env;
 
 /** Information about the Kubernetes hosting platform. */
@@ -10,6 +11,7 @@ export interface PlatformInfo {
   provider: string;
   providerName: string;
   kubeflowVersion: string;
+  logoutUrl: string;
 }
 
 /**
@@ -48,9 +50,9 @@ const APP_API_NAME = 'applications';
 
 /** Wrap Kubernetes API calls in a simpler interface for use in routes. */
 export class KubernetesService {
-  private namespace = 'kubeflow';
-  private coreAPI: k8s.Core_v1Api;
-  private customObjectsAPI: k8s.Custom_objectsApi;
+  private namespace = process.env.POD_NAMESPACE || 'kubeflow';
+  private coreAPI: k8s.CoreV1Api;
+  private customObjectsAPI: k8s.CustomObjectsApi;
   private dashboardConfigMap = DASHBOARD_CONFIGMAP;
 
   constructor(private kubeConfig: k8s.KubeConfig) {
@@ -61,9 +63,9 @@ export class KubernetesService {
     if (context && context.namespace) {
       this.namespace = context.namespace;
     }
-    this.coreAPI = this.kubeConfig.makeApiClient(k8s.Core_v1Api);
+    this.coreAPI = this.kubeConfig.makeApiClient(k8s.CoreV1Api);
     this.customObjectsAPI =
-        this.kubeConfig.makeApiClient(k8s.Custom_objectsApi);
+        this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
   }
 
   /** Retrieves the list of namespaces from the Cluster. */
@@ -89,7 +91,7 @@ export class KubernetesService {
   }
 
   /** Retrieves the list of events for the given Namespace from the Cluster. */
-  async getEventsForNamespace(namespace: string): Promise<k8s.V1Event[]> {
+  async getEventsForNamespace(namespace: string): Promise<k8s.CoreV1Event[]> {
     try {
       const {body} = await this.coreAPI.listNamespacedEvent(namespace);
       return body.items;
@@ -111,7 +113,8 @@ export class KubernetesService {
       return {
         kubeflowVersion: version,
         provider,
-        providerName: provider.split(':')[0]
+        providerName: provider.split(':')[0],
+        logoutUrl : LOGOUT_URL,
       };
     } catch (err) {
       console.error('Unexpected error', err);

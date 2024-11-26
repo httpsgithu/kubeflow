@@ -38,6 +38,14 @@ type PodDefaultSpec struct {
 	// +optional
 	Desc string `json:"desc,omitempty"`
 
+	// InitContainers defines the initContainers to attach to the pod.
+	// +optional
+	InitContainers []v1.Container `json:"initContainers,omitempty"`
+
+	// Sidecars defines the containers to attach to the pod.
+	// +optional
+	Sidecars []v1.Container `json:"sidecars,omitempty"`
+
 	// ServiceAccountName defines the service account to attach to the pod.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
@@ -69,6 +77,15 @@ type PodDefaultSpec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 
 	Tolerations []v1.Toleration `json:"tolerations,omitempty"`
+
+	// Entrypoint array.
+	Command []string `json:"command,omitempty" protobuf:"bytes,3,rep,name=command"`
+
+	// Arguments to the entrypoint.
+	Args []string `json:"args,omitempty" protobuf:"bytes,4,rep,name=args"`
+
+	// ImagePullSecrets defines the collection of ImagePullSecrets to inject into the Pod.
+	ImagePullSecrets []v1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // PodDefaultStatus defines the observed state of PodDefault
